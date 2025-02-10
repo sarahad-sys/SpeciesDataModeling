@@ -1,0 +1,136 @@
+setwd("/Users/sarahadigwe/Downloads/Species_Data")
+library(easypackages)
+install.packages(c("raster", "geodata"))
+libraries("rgbif", "CoordinateCleaner", "sf", "countrycode", "dplyr", "ggplot2", 
+          "rnaturalearth", "rnaturalearthdata", "raster", "terra", "geodata")
+
+# Prepare data for SDM - visualization
+amelanchier <- read.csv("amelanchier_final.csv", header = TRUE)
+amelanchier2 <- amelanchier[c('decimalLongitude', 'decimalLatitude')]
+hookeri <- amelanchier2
+hookeri$occurrence <- 1
+
+coordinates(hookeri) <- c('decimalLongitude', 'decimalLatitude')
+library(raster)
+projection(hookeri) <- projection(raster())
+
+library(mapview)
+mapviewOptions(fgb = FALSE)
+mapview(hookeri)
+
+# Spatial thinning of data
+amelanchier2$occurrence <- 1
+install.packages("spThin")
+library(spThin)
+
+amelanchier_thinned <- thin(loc.data = amelanchier2, 
+                             lat.col = "decimalLatitude", 
+                             long.col = "decimalLongitude", 
+                             spec.col = "occurrence", 
+                             thin.par = 10, reps = 100, 
+                             locs.thinned.list.return = TRUE, 
+                             write.files = TRUE, 
+                             max.files = 5, 
+                             out.dir = "am/", out.base = "am_thinned", 
+                             write.log.file = TRUE,
+                             log.file = "am_thinned_full_log_file.txt")
+
+am_thinned <- read.csv("aml_thinned_thin1.csv", header = TRUE)
+
+max_lat <- ceiling(max(am_thinned$decimalLatitude))
+min_lat <- floor(min(am_thinned$decimalLatitude))
+max_lon <- ceiling(max(am_thinned$decimalLongitude))
+min_lon <- floor(min(am_thinned$decimalLongitude))
+
+geographic_extent <- terra::ext(x = c(min_lon, max_lon, min_lat, max_lat))
+world_map <- geodata::world(resolution = 3, path = "data/")
+my_map <- terra::crop(x = world_map, y = geographic_extent)
+
+plot(my_map, axes = TRUE, col = "grey95")
+points(x = am_thinned$decimalLongitude, 
+       y = am_thinned$decimalLatitude, 
+       col = "olivedrab", 
+       pch = 20, 
+       cex = 0.75)
+
+# Download world climatic data
+bio <- geodata::worldclim_global("bio", res = 0.5, path = getwd())
+dev.off()
+names(bio) <- paste0('bio', 1:19)
+
+plot(bio[[1]])
+points(am_thinned[, c('decimalLongitude', 'decimalLatitude')])
+
+bio_preds <- crop(bio, geographic_extent)
+plot(bio_preds[[1]])
+points(am_thinned[, c('decimalLongitude', 'decimalLatitude')])
+
+install.packages("usdm")
+library(usdm)
+cors <- vifstep(bio_preds)
+final_preds <- exclude(bio_preds, cors)
+
+biof <- geodata::cmip6_world("CanESM5", ssp = "585", var = "bioc", res = 0.5, path = getwd(), time = "2081-2100")
+names(biof) <- names(bio)
+
+# Prepare data and run SDM
+Sys.setenv(JAVA_HOME = "/Library/Java/JavaVirtualMachines/zulu-21.jdk/Contents/Home")
+install.packages("rJava")
+library(rJava)
+
+devtools::install_github("babaknaimi/sdm")
+library(sdm)
+installAll()
+
+amelan <- vect(am_thinned, c('decimalLongitude', 'decimalLatitude'))
+mod_data <- sdmData(occurrence ~ ., train = amelan, 
+                    predictors = final_preds, 
+                    bg = list(n = 10,000, method = 'gRandom'))
+
+amelan_mod <- sdm(occurrence ~ ., mod_data, method = c('rf', 'brt', 'maxent', 'svm'), 
+                  replication = 'sub', n = 10, test.p = 30)
+
+roc(amelan_mod)
+gui(amelan_mod)
+
+write.sdm(amelan_mod, 'my_model.sdm', overwrite = TRUE)
+
+rcurve(amelan_mod, id = 31:40)
+getResponseCurve(amelan_mod, id = 1)
+vars <- getVarImp(amelan_mod, id = 1:10)
+plot(vars, 'auc')
+
+# Use SDM for predictions
+mod.ensm <- ensemble(amelan_mod, final_preds, filename = 'amelan.tif', 
+                     setting = list(method = 'weighted', stat = 'auc'))
+
+plot(mod.ensm)
+
+vars_e <- getVarImp(amelan_mod, id = "ensemble", setting = list(method = 'weighted', stat = 'auc'))
+plot(vars_e, 'auc')
+
+fut_ensm <- ensemble(amelan_mod, biof, filename = 'ens_future.tif', 
+                      setting = list(method = 'weighted', stat = 'auc'))
+
+plot(fut_ensm)
+
+# Produce a habitat suitability map
+ev <- sdm::evaluates(mod_data, mod.ensm)
+th <- ev@threshold_based$threshold[2]
+
+pa <- ifel(mod.ensm >= th, 1, 0)
+plot(pa)
+points(am_thinned[, c('decimalLongitude', 'decimalLatitude')])
+
+paf <- ifel(fut_ensm >= th, 1, 0)
+plot(paf)
+
+# Range change due to climate change
+bh_change <- fut_ensm - mod.ensm
+plot(bh_change)
+
+bh_habitat <- paf - pa
+plot(bh_habitat, col = c('red', 'gray', 'darkgreen'))
+
+dismo::nicheOverlap(mod.ensm, fut_ensm, stat = 'I', 
+                    mask = TRUE, checkNegatives = TRUE)
