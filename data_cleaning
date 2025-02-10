@@ -1,0 +1,100 @@
+## Load R packages and libraries
+setwd("/Users/sarahadigwe/Downloads/Species_Data")
+library(easypackages)
+libraries("rgbif", "CoordinateCleaner", "sf", "countrycode", "dplyr", "ggplot2", 
+          "rnaturalearth", "rnaturalearthdata", "maps")
+
+## Upload and visualize species data
+amelanchier <- read.csv("df_species1.csv")
+wm <- borders("world", colour = "gray50", fill = "gray50")
+
+ggplot() +
+  coord_fixed() +
+  wm +
+  geom_point(data = amelanchier,
+             aes(x = decimalLongitude, y = decimalLatitude),
+             colour = "darkred",
+             size = 0.5) +
+  theme_bw()
+
+## Identify and remove coordinates with issues
+amelanchier$countryCode <- countrycode(amelanchier$countryCode, 
+                                       origin = 'iso2c',
+                                       destination = 'iso3c')
+
+flags <- clean_coordinates(x = amelanchier, 
+                           lon = "decimalLongitude", 
+                           lat = "decimalLatitude",
+                           countries = "countryCode",
+                           species = "scientificName",
+                           tests = c("capitals", "centroids",
+                                     "equal", "zeros", "countries"))
+
+dat_cl <- amelanchier[flags$.summary,]
+dat_fl <- amelanchier[!flags$.summary,]
+
+## Remove records with low coordinate precision
+dat_cl %>% 
+  mutate(Uncertainty = coordinateUncertaintyInMeters / 1000) %>% 
+  ggplot(aes(x = Uncertainty)) + 
+  geom_histogram() +
+  xlab("Coordinate uncertainty in meters") +
+  theme_bw()
+
+dat_cl <- dat_cl %>%
+  filter(coordinateUncertaintyInMeters / 1000 <= 100 | 
+           is.na(coordinateUncertaintyInMeters))
+
+## Remove fossil records
+dat_cl <- filter(dat_cl, basisOfRecord %in% c("HUMAN_OBSERVATION", 
+                                              "OBSERVATION", 
+                                              "PRESERVED_SPECIMEN"))
+
+## Remove records with individual counts of 0
+dat_cl <- dat_cl %>%
+  filter(individualCount > 0 | is.na(individualCount)) %>%
+  filter(individualCount < 99 | is.na(individualCount))
+
+## Remove older records
+dat_cl <- dat_cl %>%
+  filter(year > 1945)
+
+## Check for coordinate conversion errors
+out.ddmm <- cd_ddmm(dat_cl, lon = "decimalLongitude", lat = "decimalLatitude", 
+                    ds = "scientificName", diagnostic = TRUE, diff = 1,
+                    value = "dataset")
+
+## Check for rasterized coordinate data
+par(mfrow = c(2,2), mar = rep(2, 4))
+out.round <- cd_round(dat_cl, lon = "decimalLongitude", 
+                      lat = "decimalLatitude", 
+                      ds = "scientificName",
+                      value = "dataset",
+                      T1 = 7,
+                      graphs = TRUE)
+
+## Plot cleaned dataset
+ggplot() +
+  coord_fixed() +
+  wm +
+  geom_point(data = dat_cl,
+             aes(x = decimalLongitude, y = decimalLatitude),
+             colour = "darkred",
+             size = 0.5) +
+  theme_bw()
+
+## Remove non-native species countries
+amelanchier.final <- subset(dat_cl, !(countryCode %in% c("RUS", "DNK", "SWE", "DEU", "CZE", "AUT", "LVA", "EST", "CHN", "NLD")))
+
+## Final dataset visualization
+ggplot() +
+  coord_fixed() +
+  wm +
+  geom_point(data = amelanchier.final,
+             aes(x = decimalLongitude, y = decimalLatitude),
+             colour = "darkred",
+             size = 0.5) +
+  theme_bw()
+
+## Save cleaned dataset
+write.csv(amelanchier.final, "amelanchier.csv")
